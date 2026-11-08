@@ -187,7 +187,7 @@ const API = 'https://www.googleapis.com/calendar/v3';
 const SYSTEM_CALS = ['Projetos', 'Aniversários', 'Férias', 'Arquivo'];
 const PX = 52; // altura de cada hora, em pixels
 const EVT_COLORS = {1:'#7986cb',2:'#33b679',3:'#8e24aa',4:'#e67c73',5:'#f6bf26',6:'#f4511e',7:'#039be5',8:'#616161',9:'#3f51b5',10:'#0b8043',11:'#d50000'};
-const LABELS = {contratante:'Contratante',contato:'Contato',prazo:'Prazo final',status:'Status',categoria:'Categoria',pessoas:'Pessoas envolvidas',responsavel:'Responsável'};
+const LABELS = {contratante:'Contratante/terceirizado',contatoNome:'Pessoa de contato',contato:'Contato',prazo:'Prazo final',status:'Status',categoria:'Categoria',pessoas:'Pessoas envolvidas',responsavel:'Responsável'};
 
 /* ===== Estado ===== */
 let view = 'home', me = null, token = null, tc = null, cals = [], sel = new Set(), day = startOf(new Date()), events = [];
@@ -326,7 +326,7 @@ function render(){
   flush();
 
   t.forEach(x => {
-    const b = el('button', {className:'ev' + (x.n > 1 ? ' conf' : '')}, [
+    const b = el('button', {className:'ev' + (t.some(y => y !== x && y.s < x.f && y.f > x.s && sameLoc(x.e, y.e)) ? ' conf' : '')}, [
       el('b', {textContent: x.e.summary || '(sem título)'}),
       el('small', {textContent: hhmm(new Date(x.e.start.dateTime)) + ' – ' + hhmm(new Date(x.e.end.dateTime)) + (x.e.location ? ' · ' + x.e.location : '')})
     ]);
@@ -471,7 +471,7 @@ function manageCal(c){
     const sv = el('button', {className:'primary', textContent:'Salvar nome', onclick: async () => {
       const v = nm.value.trim();
       if (!v){ err.textContent = 'O nome não pode ficar vazio.'; return; }
-      try { await api('/calendars/' + enc(c.id), {method:'PATCH', body:JSON.stringify({summary:v})}); $('#dlg').close(); await loadCals(); await loadDay(); }
+      try { const em = await aclEmails(c); await api('/calendars/' + enc(c.id), {method:'PATCH', body:JSON.stringify({summary:v})}); $('#dlg').close(); await loadCals(); await loadDay(); offerMail(em, 'Agenda renomeada: ' + v, 'A agenda "' + c.summary + '" agora se chama "' + v + '".'); }
       catch(x){ err.textContent = 'Não foi possível salvar: ' + x.message; }
     }});
     kids.push(el('h4', {textContent:'Nome da agenda'}), el('div', {className:'frow'}, [nm, sv]));
@@ -514,8 +514,10 @@ function manageCal(c){
         : 'Remover "' + name + '" da sua lista? A agenda continua existindo para o dono.';
       if (!confirm(msg)) return;
       try {
+        const em = owner ? await aclEmails(c) : [];
         await api(owner ? '/calendars/' + enc(c.id) : '/users/me/calendarList/' + enc(c.id), {method:'DELETE'});
         $('#dlg').close(); await loadCals(); await loadDay();
+        if (owner) offerMail(em, 'Agenda excluída: ' + name, 'A agenda "' + name + '" foi excluída e deixou de aparecer no Google Agenda.');
       } catch(x){ err.textContent = 'Não foi possível excluir: ' + x.message; }
     }}));
   }
@@ -567,21 +569,23 @@ function noWritable(){
 const MARK = '── Detalhes do projeto ──';
 const brDate = s => s.split('-').reverse().join('/');
 function detailsBlock(f){
-  const has = ['contratante','contato','responsavel','pessoas','status','prazo'].some(k => f[k]);
+  const has = ['contratante','contatoNome','contato','responsavel','pessoas','status','prazo'].some(k => f[k]);
   if (!has) return '';
-  const L = [['Contratante', f.contratante], ['Contato', f.contato], ['Responsável interno', f.responsavel], ['Pessoas envolvidas', f.pessoas],
+  const L = [['Contratante/terceirizado', f.contratante], ['Pessoa de contato', f.contatoNome], ['Contato', f.contato], ['Responsável interno', f.responsavel], ['Pessoas envolvidas', f.pessoas],
     ['Local', f.loc], ['Status', f.status], ['Prazo final', f.prazo && brDate(f.prazo)]].filter(x => x[1]);
   return MARK + '\n' + L.map(x => x[0] + ': ' + x[1]).join('\n');
 }
 
 const REM = [['default','Padrão da agenda'],['off','Desativadas'],['10','10 minutos antes'],['60','1 hora antes'],['1440','1 dia antes'],['10080','1 semana antes']];
 const isBday = id => /anivers|birthday/i.test(cals.find(c => c.id === id)?.summary || '');
+const normLoc = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+const sameLoc = (a, b) => { const x = normLoc(a.location); return !!x && x === normLoc(b.location); };
 const remBody = v => v === 'default' ? {useDefault:true} : v === 'off' ? {useDefault:false, overrides:[]} : {useDefault:false, overrides:[{method:'popup', minutes:+v}]};
 
 function buildBody(f, patch){
   const nz = v => v || (patch ? null : undefined);
   const shared = {};
-  ['contratante','contato','responsavel','pessoas','status','prazo'].forEach(k => { if (f[k]) shared[k] = f[k]; else if (patch) shared[k] = null; });
+  ['contratante','contatoNome','contato','responsavel','pessoas','status','prazo'].forEach(k => { if (f[k]) shared[k] = f[k]; else if (patch) shared[k] = null; });
   const body = {summary:f.title, description:nz([f.desc, detailsBlock(f)].filter(Boolean).join('\n\n')), location:nz(f.loc), colorId:nz(f.color),
     reminders:remBody(f.rem || 'default'), extendedProperties:{shared}};
   if (!patch && !Object.keys(shared).length) delete body.extendedProperties;
@@ -594,12 +598,13 @@ function buildBody(f, patch){
   }
   if (f.repeat === 'YEARLY') body.recurrence = ['RRULE:FREQ=YEARLY'];
   else if (f.repeat && f.count > 1) body.recurrence = ['RRULE:FREQ=' + f.repeat + ';COUNT=' + f.count];
+  if (f.guests && (f.guests.length || f.hadGuests)) body.attendees = [...new Set([...(f.keepAtt || []), ...f.guests])].map(email => ({email}));
   return body;
 }
 
 async function createEvent(calId, f){
   const base = '/calendars/' + enc(calId) + '/events';
-  await api(base, {method:'POST', body:JSON.stringify(buildBody(f, false))});
+  await api(base + '?sendUpdates=' + (f.notify ? 'all' : 'none'), {method:'POST', body:JSON.stringify(buildBody(f, false))});
   if (f.prazo && f.makeDeadline){
     await api(base, {method:'POST', body:JSON.stringify({
       summary:'Prazo: ' + f.title, description:['Data limite do projeto "' + f.title + '".', detailsBlock(f)].filter(Boolean).join('\n\n'), colorId:'5',
@@ -608,7 +613,7 @@ async function createEvent(calId, f){
     })});
   }
 }
-const saveEvent = (ev, f) => api('/calendars/' + enc(ev._cal.id) + '/events/' + enc(ev.id) + '?sendUpdates=all', {method:'PATCH', body:JSON.stringify(buildBody(f, true))});
+const saveEvent = (ev, f) => api('/calendars/' + enc(ev._cal.id) + '/events/' + enc(ev.id) + '?sendUpdates=' + (f.notify ? 'all' : 'none'), {method:'PATCH', body:JSON.stringify(buildBody(f, true))});
 
 function eventForm(ev){
   if (!ev && noWritable()) return;
@@ -618,7 +623,9 @@ function eventForm(ev){
   const f = {title:I('text', {maxLength:200, value:ev?.summary || ''}), cal:calSelect(), color:colorSelect(), all:I('checkbox', {checked:allDay}),
     date:I('date'), start:I('time'), end:I('time'), loc:I('text', {value:ev?.location || ''}),
     desc:el('textarea', {value:(ev?.description || '').split(MARK)[0].trim()}),
-    contratante:I('text', {value:sh.contratante || ''}), contato:I('text', {value:sh.contato || ''}),
+    contratante:I('text', {value:sh.contratante || ''}), contatoNome:I('text', {value:sh.contatoNome || ''}), contato:I('text', {value:sh.contato || ''}),
+    guests:I('text', {placeholder:'maria@gmail.com, joao@gmail.com', value:(ev?.attendees || []).filter(a => !(a.self || a.organizer || isGroup(a.email) || a.resource)).map(a => a.email).join(', ')}),
+    notify:I('checkbox', {checked:true}),
     responsavel:I('text', {value:sh.responsavel || ''}), pessoas:I('text', {value:sh.pessoas || ''}),
     status:el('select', {}, [el('option', {value:'', textContent:'Sem status'}), ...STATUS.map(s => el('option', {value:s, textContent:s}))]),
     prazo:I('date', {value:sh.prazo || ''}), mk:I('checkbox', {checked:true}),
@@ -640,9 +647,15 @@ function eventForm(ev){
   const err = el('p', {className:'err'});
   const ok = el('button', {className:'primary', textContent: ev ? 'Salvar alterações' : 'Criar evento', onclick: async () => {
     const v = {title:f.title.value.trim(), date:f.date.value, desc:f.desc.value.trim(), loc:f.loc.value.trim(), color:f.color.value,
-      contratante:f.contratante.value.trim(), contato:f.contato.value.trim(), responsavel:f.responsavel.value.trim(), pessoas:f.pessoas.value.trim(),
+      contratante:f.contratante.value.trim(), contatoNome:f.contatoNome.value.trim(), contato:f.contato.value.trim(), responsavel:f.responsavel.value.trim(), pessoas:f.pessoas.value.trim(),
       status:f.status.value, prazo:f.prazo.value, makeDeadline:f.mk.checked, rem:f.rem.value};
     if (!f.all.checked){ v.start = f.start.value; v.end = f.end.value; }
+    v.notify = f.notify.checked;
+    const gl = f.guests.value.split(/[,;\s]+/).map(s => s.trim()).filter(Boolean);
+    const badMail = gl.find(m => !/^\S+@\S+\.\S+$/.test(m));
+    if (badMail){ err.textContent = 'E-mail inválido nos convidados: ' + badMail; return; }
+    const att = ev?.attendees || [], mine = a => a.self || a.organizer || isGroup(a.email) || a.resource;
+    v.guests = gl; v.hadGuests = att.some(a => !mine(a)); v.keepAtt = att.filter(mine).map(a => a.email);
     if (!v.title || !v.date){ err.textContent = 'Informe o título e a data.'; return; }
     if (!f.all.checked && (!v.start || !v.end || v.end <= v.start)){ err.textContent = 'Informe o início e um fim depois do início, ou marque "Dia inteiro".'; return; }
     if (f.repeat.value){
@@ -666,9 +679,12 @@ function eventForm(ev){
     fld('Notificações', f.rem), fld('Local', f.loc), fld('Descrição', f.desc),
     el('h4', {textContent:'Detalhes do projeto (opcional)'}),
     el('p', {className:'muted', textContent:'Estes dados também são escritos, organizados, na descrição do evento. Assim aparecem para todos no Google Agenda.'}),
-    g2([fld('Contratante', f.contratante), fld('Contato do contratante', f.contato)]),
-    g2([fld('Responsável interno', f.responsavel), fld('Pessoas envolvidas', f.pessoas)]),
-    g2([fld('Status', f.status), fld('Prazo final', f.prazo)]),
+    g2([fld('Contratante/terceirizado', f.contratante), fld('Nome da pessoa de contato', f.contatoNome)]),
+    g2([fld('Contato (telefone ou e-mail)', f.contato), fld('Responsável interno', f.responsavel)]),
+    g2([fld('Pessoas envolvidas', f.pessoas), fld('Status', f.status)]),
+    g2([fld('Prazo final', f.prazo), el('div')]),
+    fld('Convidados (e-mails separados por vírgula)', f.guests),
+    el('label', {className:'chk'}, [f.notify, 'Avisar os convidados por e-mail ao salvar']),
     ...(ev ? [] : [el('label', {className:'chk'}, [f.mk, 'Criar também um evento no dia do prazo, com lembretes'])]),
     err, el('div', {className:'acts'}, [el('button', {textContent:'Cancelar', onclick:() => $('#dlg').close()}), ok])
   ]);
@@ -747,13 +763,13 @@ function bulkDialog(){
 $('#bulk').onclick = bulkDialog;
 
 /* ===== Relatório ===== */
-const REP_HEAD = ['Data','Horário','Evento','Agenda','Local','Contratante','Contato do contratante','Responsável interno','Pessoas envolvidas','Status','Prazo final','Descrição'];
+const REP_HEAD = ['Data','Horário','Evento','Agenda','Local','Contratante/terceirizado','Pessoa de contato','Contato','Responsável interno','Pessoas envolvidas','Status','Prazo final','Descrição'];
 const startDate = e => e.start.date ? new Date(e.start.date + 'T00:00:00') : new Date(e.start.dateTime);
 function rowOf(e){
   const p = e.extendedProperties?.shared || {};
   const s = startDate(e);
   return [s.toLocaleDateString('pt-BR'), e.start.date ? 'Dia inteiro' : hhmm(s) + ' – ' + hhmm(new Date(e.end.dateTime)), e.summary || '(sem título)',
-    e._cal.summaryOverride || e._cal.summary, e.location || '', p.contratante || '', p.contato || '', p.responsavel || '', p.pessoas || '', p.status || '',
+    e._cal.summaryOverride || e._cal.summary, e.location || '', p.contratante || '', p.contatoNome || '', p.contato || '', p.responsavel || '', p.pessoas || '', p.status || '',
     p.prazo ? brDate(p.prazo) : '', (e.description || '').split(MARK)[0].trim()];
 }
 function downloadCsv(rows, name){
@@ -829,7 +845,7 @@ const title = e => e.summary || '(sem título)';
 
 async function setStatus(e, status){
   const f = {...(e.extendedProperties?.shared || {}), status, loc:e.location || '', desc:(e.description || '').split(MARK)[0].trim()};
-  await api('/calendars/' + enc(e._cal.id) + '/events/' + enc(e.id), {method:'PATCH', body:JSON.stringify({
+  await api('/calendars/' + enc(e._cal.id) + '/events/' + enc(e.id) + '?sendUpdates=all', {method:'PATCH', body:JSON.stringify({
     description:[f.desc, detailsBlock(f)].filter(Boolean).join('\n\n') || null, extendedProperties:{shared:{status}}})});
 }
 
@@ -851,7 +867,7 @@ async function loadHome(){
   const over = work.filter(e => sh(e).prazo && sh(e).prazo < today).sort((a, b) => sh(a).prazo.localeCompare(sh(b).prazo));
   const timed = pend.filter(e => e.start.dateTime).map(e => ({e, s:new Date(e.start.dateTime), f:new Date(e.end.dateTime)}));
   const conf = [];
-  timed.forEach((x, i) => timed.slice(0, i).forEach(y => { if (y.f > x.s && y.s < x.f) conf.push([y, x]); }));
+  timed.forEach((x, i) => timed.slice(0, i).forEach(y => { if (y.f > x.s && y.s < x.f && sameLoc(y.e, x.e)) conf.push([y, x]); }));
   const hoje = work.filter(e => ymd(startDate(e)) === today).length;
   const mes = t0.toLocaleDateString('pt-BR', {month:'long'});
 
@@ -859,10 +875,10 @@ async function loadHome(){
   cards.push(card('Aniversariantes de ' + mes, births.length
     ? births.map(e => li(e, pad(startDate(e).getDate()) + '/' + pad(startDate(e).getMonth() + 1), title(e), ymd(startDate(e)) === today ? bd('p', 'hoje') : null))
     : [none('Nenhum aniversário neste mês nas agendas marcadas.')]));
-  cards.push(card('Conflitos de horário', conf.length
+  cards.push(card('Conflitos de local e horário', conf.length
     ? conf.slice(0, 10).map(([a, b]) => li(b.e, dShort(b.s) + ' · ' + hhmm(b.s),
-        title(a.e) + ' (' + hhmm(a.s) + '–' + hhmm(a.f) + ') × ' + title(b.e) + ' (' + hhmm(b.s) + '–' + hhmm(b.f) + ')', bd('r', 'conflito')))
-    : [none('Nenhum conflito de horário nos próximos 30 dias.')], conf.length ? 'alert' : ''));
+        title(a.e) + ' (' + hhmm(a.s) + '–' + hhmm(a.f) + ') × ' + title(b.e) + ' (' + hhmm(b.s) + '–' + hhmm(b.f) + ') · Local: ' + b.e.location, bd('r', 'conflito')))
+    : [none('Nenhum conflito de local e horário nos próximos 30 dias. Só contam eventos com o mesmo local preenchido.')], conf.length ? 'alert' : ''));
   if (over.length) cards.push(card('Prazos vencidos', over.map(e => li(e, brDate(sh(e).prazo), title(e), bd('r', 'vencido'))), 'alert'));
   cards.push(card('Eventos pendentes · próximos 30 dias', pend.length
     ? pend.slice(0, 25).map(e => {
@@ -887,7 +903,7 @@ async function loadHist(){
     box.append(el('p', {className:'muted', textContent:evs.length + ' projeto(s) concluído(s) ou encerrado(s). Os dados continuam guardados; use "Reabrir" para voltar à agenda.'}));
     if (!evs.length) return;
     box.append(el('div', {className:'rwrap'}, el('table', {className:'rtab'}, [
-      el('thead', {}, el('tr', {}, ['Data', 'Projeto', 'Agenda', 'Contratante', 'Responsável', 'Status', ''].map(h => el('th', {textContent:h})))),
+      el('thead', {}, el('tr', {}, ['Data', 'Projeto', 'Agenda', 'Contratante/terceirizado', 'Responsável', 'Status', ''].map(h => el('th', {textContent:h})))),
       el('tbody', {}, evs.map(e => {
         const p = e.extendedProperties.shared;
         const tr = el('tr', {}, [startDate(e).toLocaleDateString('pt-BR'), title(e), e._cal.summaryOverride || e._cal.summary, p.contratante || '', p.responsavel || '', p.status].map(c => el('td', {textContent:c})));
@@ -932,6 +948,17 @@ function copyText(text, btn){
   const done = () => { const o = btn.textContent; btn.textContent = 'Link copiado!'; setTimeout(() => { btn.textContent = o; }, 2000); };
   if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(done, () => prompt('Copie o link:', text));
   else prompt('Copie o link:', text);
+}
+async function aclEmails(c){
+  try {
+    const d = await api('/calendars/' + enc(c.id) + '/acl');
+    return d.items.filter(r => r.scope.type === 'user' && !isGroup(r.scope.value) && r.scope.value.toLowerCase() !== (me?.email || '').toLowerCase()).map(r => r.scope.value);
+  } catch(e){ return []; }
+}
+function offerMail(emails, subject, body){
+  if (!emails.length || !confirm('Avisar por e-mail as ' + emails.length + ' pessoa(s) com acesso a esta agenda? Vai abrir o seu programa de e-mail com a mensagem pronta.')) return;
+  const a = el('a', {href:'mailto:?bcc=' + enc(emails.join(',')).replace(/%2C/g, ',') + '&subject=' + enc(subject) + '&body=' + enc(body)});
+  document.body.append(a); a.click(); a.remove();
 }
 async function start(){
   $('#login').style.display = 'none'; $('#app').style.display = 'grid'; $('#out').hidden = false;
