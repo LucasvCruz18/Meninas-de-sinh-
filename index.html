@@ -227,7 +227,7 @@ $('#out').onclick = () => {
 async function api(path, opt = {}){
   const r = await fetch(API + path, {...opt, headers:{Authorization:'Bearer ' + token, 'Content-Type':'application/json'}});
   if (r.status === 401){ token = null; showLogin('Sua sessão expirou. Entre novamente.'); throw new Error('401'); }
-  if (!r.ok){ const j = await r.json().catch(() => ({})); throw new Error(j.error?.message || r.status); }
+  if (!r.ok){ const j = await r.json().catch(() => ({})); const e0 = j.error?.errors?.[0]; throw new Error((j.error?.message || r.status) + (e0?.location ? ' [campo: ' + e0.location + ']' : '') + (e0?.reason ? ' (' + e0.reason + ')' : '')); }
   return r.status === 204 ? null : r.json();
 }
 
@@ -583,18 +583,19 @@ const sameLoc = (a, b) => { const x = normLoc(a.location); return !!x && x === n
 const remBody = v => v === 'default' ? {useDefault:true} : v === 'off' ? {useDefault:false, overrides:[]} : {useDefault:false, overrides:[{method:'popup', minutes:+v}]};
 
 function buildBody(f, patch){
-  const nz = v => v || (patch ? null : undefined);
+  const o = f.orig || {};
+  const nz = (v, had) => v || (patch && had ? null : undefined);
   const shared = {};
-  ['contratante','contatoNome','contato','responsavel','pessoas','status','prazo'].forEach(k => { if (f[k]) shared[k] = f[k]; else if (patch) shared[k] = null; });
-  const body = {summary:f.title, description:nz([f.desc, detailsBlock(f)].filter(Boolean).join('\n\n')), location:nz(f.loc), colorId:nz(f.color),
+  ['contratante','contatoNome','contato','responsavel','pessoas','status','prazo'].forEach(k => { if (f[k]) shared[k] = f[k]; else if (patch && f.origShared && k in f.origShared) shared[k] = null; });
+  const body = {summary:f.title, description:nz([f.desc, detailsBlock(f)].filter(Boolean).join('\n\n'), o.description), location:nz(f.loc, o.location), colorId:nz(f.color, o.colorId),
     reminders:remBody(f.rem || 'default'), extendedProperties:{shared}};
-  if (!patch && !Object.keys(shared).length) delete body.extendedProperties;
+  if (!Object.keys(shared).length) delete body.extendedProperties;
   if (f.start){
     body.start = {dateTime:f.date + 'T' + f.start + ':00', timeZone:TZ}; body.end = {dateTime:f.date + 'T' + f.end + ':00', timeZone:TZ};
-    if (patch){ body.start.date = null; body.end.date = null; }
+    if (patch && o.allDay){ body.start.date = null; body.end.date = null; }
   } else {
     body.start = {date:f.date}; body.end = {date:nextDay(f.date)};
-    if (patch){ body.start.dateTime = null; body.end.dateTime = null; }
+    if (patch && o.allDay === false){ body.start.dateTime = null; body.end.dateTime = null; }
   }
   if (f.repeat === 'YEARLY') body.recurrence = ['RRULE:FREQ=YEARLY'];
   else if (f.repeat && f.count > 1) body.recurrence = ['RRULE:FREQ=' + f.repeat + ';COUNT=' + f.count];
@@ -656,6 +657,8 @@ function eventForm(ev){
     if (badMail){ err.textContent = 'E-mail inválido nos convidados: ' + badMail; return; }
     const att = ev?.attendees || [], mine = a => a.self || a.organizer || isGroup(a.email) || a.resource;
     v.guests = gl; v.hadGuests = att.some(a => !mine(a)); v.keepAtt = att.filter(mine).map(a => a.email);
+    v.orig = ev ? {description:!!ev.description, location:!!ev.location, colorId:!!ev.colorId, allDay:!!ev.start.date} : null;
+    v.origShared = ev?.extendedProperties?.shared || null;
     if (!v.title || !v.date){ err.textContent = 'Informe o título e a data.'; return; }
     if (!f.all.checked && (!v.start || !v.end || v.end <= v.start)){ err.textContent = 'Informe o início e um fim depois do início, ou marque "Dia inteiro".'; return; }
     if (f.repeat.value){
