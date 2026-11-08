@@ -184,7 +184,7 @@ body.reporting>header,body.reporting #app{display:none!important}
 const CLIENT_ID = '89272086517-pkhbpeadd4kia923kn76ddgf6pl9fscv.apps.googleusercontent.com';
 const SCOPE = 'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email';
 const API = 'https://www.googleapis.com/calendar/v3';
-const SYSTEM_CALS = ['Projetos', 'Aniversários', 'Férias', 'Arquivo'];
+const SYSTEM_CALS = ['Projetos', 'Aniversários', 'Férias', 'Atividades extras'];
 const PX = 52; // altura de cada hora, em pixels
 const EVT_COLORS = {1:'#7986cb',2:'#33b679',3:'#8e24aa',4:'#e67c73',5:'#f6bf26',6:'#f4511e',7:'#039be5',8:'#616161',9:'#3f51b5',10:'#0b8043',11:'#d50000'};
 const LABELS = {contratante:'Contratante/terceirizado',contatoNome:'Pessoa de contato',contato:'Contato',prazo:'Prazo final',status:'Status',categoria:'Categoria',pessoas:'Pessoas envolvidas',responsavel:'Responsável'};
@@ -256,7 +256,7 @@ async function loadCals(){
   $('#mk').hidden = SYSTEM_CALS.every(n => names.includes(n));
 }
 $('#mk').onclick = async () => {
-  if (!confirm('Criar as agendas Projetos, Aniversários, Férias e Arquivo na sua conta?')) return;
+  if (!confirm('Criar as agendas Projetos, Aniversários, Férias e Atividades extras na sua conta?')) return;
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
   try {
     const have = cals.map(c => c.summary);
